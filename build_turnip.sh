@@ -138,8 +138,6 @@ apply_a840_oneplus15_tuning() {
     log "A840 OnePlus 15: applying Snapdragon 8 Elite Gen 5 (18MB HPM, UBWC5/6, Autotune, 64KB SharedMem, profile=$profile) tuning..."
     python3 "$REPO_ROOT/patches/patchsv2/a8xx_shared_mem.py"
     OP15_POWER_PROFILE="$profile" python3 "$REPO_ROOT/patches/a8xx/a840_oneplus15_tune.py"
-    log "A840 OnePlus 15: applying Vauzi-17 / Turnip-Z / Droid-Deck super-optimizations (LRZ preserve, Mutable UBWC, IR3 scheduler, DrawState skip)..."
-    python3 "$REPO_ROOT/patches/a8xx/a840_super_optimizations.py"
 }
 
 apply_patchsv3_a8xx() {
@@ -149,7 +147,6 @@ apply_patchsv3_a8xx() {
     PYTHONPATH="$dd/scripts" python3 "$dd/scripts/a8xx_gpu_ids.py"
     PYTHONPATH="$dd/scripts" python3 "$dd/scripts/apply_a8xx_cat4_rpt.py"
     PYTHONPATH="$dd/scripts" python3 "$dd/scripts/process_heap_usage.py"
-    PYTHONPATH="$dd/scripts" python3 "$dd/scripts/a8xx_suspended_rp_flush.py"
 
     local patch_file target marker
     for patch_file in \

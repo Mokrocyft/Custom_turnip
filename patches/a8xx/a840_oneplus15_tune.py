@@ -5,19 +5,15 @@ OnePlus 15 (Snapdragon 8 Elite Gen 5 / SM8850 / Adreno 840) Hardware, Autotune &
 Supports two modes via env var `OP15_POWER_PROFILE`:
 - "eco" (default for `a8xx-oneplus15-ultra`):
     * Maximizes FPS-per-Watt and lowers battery drain & heat.
-    * Uses smart GMEM autotune (drawcall threshold 8, bandwidth multiplier 9/10) so tiny passes
-      skip GMEM binning overhead while heavy deferred lighting passes stay inside the 18 MB HPM
-      (avoiding costly external LPDDR5X traffic).
-    * Keeps standard KGSL dynamic frequency scaling active (no artificial PWR_MAX lock).
+    * Uses smart GMEM autotune (drawcall threshold 8, bandwidth multiplier 9/10).
+    * Keeps standard KGSL dynamic frequency scaling active.
 - "max" (for `a8xx-oneplus15-max` / WinNative-P style):
     * Aggressive GMEM retention (drawcall threshold 10, bandwidth multiplier 9/10).
-    * Enables WinNative-P `KGSL_PROP_PWR_CONSTRAINT = PWR_MAX` at queue creation to lock
-      Adreno 840 at peak clocks for zero clock-drop stutters.
+    * Enables WinNative-P `KGSL_PROP_PWR_CONSTRAINT = PWR_MAX` at queue creation.
 """
 import os
 from pathlib import Path
 import re
-import sys
 
 power_profile = os.environ.get("OP15_POWER_PROFILE", "eco")
 print(f"a840_oneplus15_tune: configuring for OnePlus 15 profile = '{power_profile}'")
@@ -28,7 +24,6 @@ if devices_py.exists():
     txt = devices_py.read_text(encoding="utf-8")
     changed = False
 
-    # Upgrade a8xx_gen2 depth & GMEM color cache for 18 MB HPM on Adreno 840
     a8xx_gen2_start = txt.find("a8xx_gen2 = GPUProps(")
     if a8xx_gen2_start >= 0:
         a8xx_gen2_end = txt.find(")", a8xx_gen2_start)
@@ -52,7 +47,6 @@ if devices_py.exists():
                 changed = True
                 print("a840_oneplus15_tune: upgraded a8xx_gen2 CCU cache allocations for 18MB HPM")
 
-    # Ensure all Adreno 840 KGSL speedbin IDs are registered
     a840_ids = [
         ("0x44050A31", "840"),
         ("0x44050A30", "840"),
@@ -187,5 +181,127 @@ if autotune_cc.exists():
             break
     if achanged:
         autotune_cc.write_text(atxt, encoding="utf-8")
+
+
+# ── 5. Super-Optimization & Power-Efficiency Suite (Vauzi-17 / Turnip-Z / Droid-Deck / K11MCH1) ──
+def _patch_opt(rel_path, old, new, label):
+    p = Path(rel_path)
+    if not p.exists():
+        return
+    txt = p.read_text(encoding="utf-8")
+    if new in txt:
+        print(f"  [ok] {label}")
+        return
+    if old in txt:
+        p.write_text(txt.replace(old, new, 1), encoding="utf-8")
+        print(f"  [applied] {label}")
+    else:
+        print(f"  [info] {label}: anchor not matched, skipping")
+
+# K11MCH1: A8xx CCU flush on suspended render pass resume
+_patch_opt(
+    "src/freedreno/vulkan/tu_cmd_buffer.cc",
+    "   if (cmd->state.suspended) {\n      tu_emit_event_write<CHIP>(cmd, &cmd->cs, FD_CACHE_CLEAN);\n   }",
+    "   if (cmd->state.suspended) {\n"
+    "      tu_emit_event_write<CHIP>(cmd, &cmd->cs, FD_CACHE_CLEAN);\n"
+    "      if (CHIP >= A8XX) {\n"
+    "         tu_emit_event_write<CHIP>(cmd, &cmd->cs, FD_CCU_FLUSH_COLOR);\n"
+    "         tu_emit_event_write<CHIP>(cmd, &cmd->cs, FD_CCU_FLUSH_DEPTH);\n"
+    "      }\n"
+    "   }",
+    "A8xx CCU flush on suspended render pass resume (K11MCH1)"
+)
+
+# LRZ: Dynamic color_write_enable & depth_write_enable + FS side-effects preservation
+_patch_opt(
+    "src/freedreno/vulkan/tu_lrz.cc",
+    "   bool color_write = cmd->state.pipeline->color_write_enable;\n",
+    "   bool color_write = cmd->state.pipeline->color_write_enable &&\n"
+    "                      cmd->state.color_write_enable;\n",
+    "LRZ dynamic color_write_enable check (Droid-Deck / Vauzi-17 #48)"
+)
+_patch_opt(
+    "src/freedreno/vulkan/tu_lrz.cc",
+    "   bool z_write = cmd->state.pipeline->depth_write_enable;\n",
+    "   bool z_write = cmd->state.pipeline->depth_write_enable &&\n"
+    "                  cmd->state.depth_write_enable;\n",
+    "LRZ dynamic depth_write_enable check (Turnip-Z #30)"
+)
+_patch_opt(
+    "src/freedreno/vulkan/tu_lrz.cc",
+    "   if (fs->has_side_effects) {\n      lrz.valid = false;\n      return lrz;\n   }",
+    "   if (fs->has_side_effects) {\n      lrz.write = false;\n   }",
+    "Preserve LRZ validity across FS side-effect draws (Vauzi-17 #61)"
+)
+_patch_opt(
+    "src/freedreno/vulkan/tu_lrz.cc",
+    "   if (cmd->state.rp.sysmem_single_prim_mode)\n      lrz.valid = false;",
+    "   if (cmd->state.rp.sysmem_single_prim_mode && CHIP < A8XX)\n      lrz.valid = false;",
+    "Keep LRZ valid in A8xx sysmem single-prim mode (#02)"
+)
+
+# Command Buffer: Keep TEX draw state across clears & skip identical dynamic state
+_patch_opt(
+    "src/freedreno/vulkan/tu_cmd_buffer.cc",
+    "      tu_cs_emit_pkt7(cs, CP_SET_DRAW_STATE, 3);\n"
+    "      tu_cs_emit(cs, CP_SET_DRAW_STATE_0_GROUP_ID(TU_DRAW_STATE_TEX) |\n"
+    "                     CP_SET_DRAW_STATE_0_DISABLE_ALL_GROUPS);\n"
+    "      tu_cs_emit_qw(cs, 0);",
+    "      /* Turnip-Z #32: keep draw state groups active instead of issuing DISABLE_ALL_GROUPS */",
+    "Keep draw state groups active across clears (Turnip-Z #32)"
+)
+_patch_opt(
+    "src/freedreno/vulkan/tu_cmd_buffer.cc",
+    "   case VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE:\n      cmd->state.depth_bias_enable = value;\n      break;",
+    "   case VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE:\n"
+    "      if (cmd->state.depth_bias_enable != value) {\n"
+    "         cmd->state.depth_bias_enable = value;\n"
+    "         cmd->state.dirty |= TU_CMD_DIRTY_LRZ;\n"
+    "      }\n"
+    "      break;",
+    "Dirty LRZ only when dynamic depth_bias_enable changes (#30/#62)"
+)
+_patch_opt(
+    "src/freedreno/vulkan/tu_cmd_buffer.cc",
+    "   case VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE:\n      cmd->state.depth_write_enable = value;\n      cmd->state.dirty |= TU_CMD_DIRTY_LRZ;\n      break;",
+    "   case VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE:\n"
+    "      if (cmd->state.depth_write_enable != value) {\n"
+    "         cmd->state.depth_write_enable = value;\n"
+    "         cmd->state.dirty |= TU_CMD_DIRTY_LRZ;\n"
+    "      }\n"
+    "      break;",
+    "Skip redundant dirtying on identical VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE (Vauzi-17 #62)"
+)
+
+# Turnip-Z #30: Keep MUTABLE_FORMAT images tiled (TILE6_3) & UBWC-compressed
+_patch_opt(
+    "src/freedreno/vulkan/tu_image.cc",
+    "   if (modifier == DRM_FORMAT_MOD_QCOM_COMPRESSED) {\n      ubwc_enabled = true;\n   }",
+    "   if (modifier == DRM_FORMAT_MOD_QCOM_COMPRESSED) {\n"
+    "      force_linear_tile = false;\n"
+    "      tile_mode = TILE6_3;\n"
+    "      ubwc_enabled = true;\n"
+    "   }",
+    "Keep QCOM_COMPRESSED mutable images tiled and UBWC-enabled (Turnip-Z #30)"
+)
+
+# IR3 Register Pressure & Instruction Scheduler Optimization (Vauzi-17 #63)
+sched_file = Path("src/freedreno/ir3/ir3_sched.c")
+if sched_file.exists():
+    stxt = sched_file.read_text(encoding="utf-8")
+    old_sched = "   /* Prefer instructions that free up registers: */\n   int live_effect_a = live_effect(n1->instr);\n   int live_effect_b = live_effect(n2->instr);"
+    new_sched = "   /* Vauzi-17 #63: prioritize instructions with lower live register pressure growth */\n   int live_effect_a = live_effect(n1->instr);\n   int live_effect_b = live_effect(n2->instr);\n   if (live_effect_a != live_effect_b)\n      return live_effect_a - live_effect_b;"
+    if new_sched not in stxt and old_sched in stxt:
+        sched_file.write_text(stxt.replace(old_sched, new_sched, 1), encoding="utf-8")
+        print("  [applied] IR3 scheduler live register pressure prioritization (#63)")
+
+# Remove any forced TU_DEBUG_FLUSHALL on A8xx in tu_device.cc
+dev_file = Path("src/freedreno/vulkan/tu_device.cc")
+if dev_file.exists():
+    dtxt = dev_file.read_text(encoding="utf-8")
+    if "tu_env.debug |= TU_DEBUG_FLUSHALL;" in dtxt:
+        dtxt = dtxt.replace("tu_env.debug |= TU_DEBUG_FLUSHALL;", "/* Removed TU_DEBUG_FLUSHALL on A8xx for performance */")
+        dev_file.write_text(dtxt, encoding="utf-8")
+        print("  [applied] Removed forced TU_DEBUG_FLUSHALL on A8xx")
 
 print("a840_oneplus15_tune.py: done")
