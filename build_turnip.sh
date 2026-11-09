@@ -59,7 +59,7 @@ prepare_workdir() {
 
 apply_Gen8_a8xx() {
     log "A8xx Gen8: applying turnip/gen8 stack..."
-    patch -p1 -N --fuzz=4 --no-backup-if-mismatch < "$REPO_ROOT/patches/patchsv2/a8xx_gen8.patch" || true
+    patch -p1 -N -s --fuzz=4 --no-backup-if-mismatch < "$REPO_ROOT/patches/patchsv2/a8xx_gen8.patch" >/dev/null 2>&1 || true
     find src -type f \( -name "*.rej" -o -name "*.orig" \) -delete
     python3 -m py_compile src/freedreno/common/freedreno_devices.py || die "freedreno_devices.py syntax error after a8xx_gen8.patch"
     python3 "$REPO_ROOT/patches/patchsv1/android/apply_a8xx_gpus.py"
@@ -101,7 +101,7 @@ apply_Patched_extra_patches() {
             git apply "$patch_file"
         elif patch -p1 -N --fuzz=3 --dry-run < "$patch_file" >/dev/null 2>&1; then
             log "Applying $(basename "$patch_file") with fuzz..."
-            patch -p1 -N --fuzz=3 --no-backup-if-mismatch < "$patch_file"
+            patch -p1 -N -s --fuzz=3 --no-backup-if-mismatch < "$patch_file"
         else
             log "Warning: $(basename "$patch_file") already applied or conflicted on $MESA_BRANCH, skipping cleanly"
         fi
@@ -129,7 +129,7 @@ apply_a8xx_subgroup_fix() {
 }
 
 apply_a8xx_game_profiles() {
-    log "A8xx: installing game-specific profiles (Dying Light 1/2/The Beast, Cyberpunk, Uncharted, MIO)..."
+    log "A8xx: installing game-specific profiles (Muck, Dying Light 1/2/The Beast, Cyberpunk, Uncharted, MIO)..."
     python3 "$REPO_ROOT/patches/a8xx/game_ssbo_profiles.py"
 }
 
@@ -175,7 +175,7 @@ apply_patchsv3_a8xx() {
             log "patchsv3: $(basename "$patch_file") already present in Mesa"
         elif patch -p1 -N --fuzz=3 --dry-run < "$patch_file" >/dev/null 2>&1; then
             log "patchsv3: applying $(basename "$patch_file") with fuzz"
-            patch -p1 -N --fuzz=3 --no-backup-if-mismatch < "$patch_file"
+            patch -p1 -N -s --fuzz=3 --no-backup-if-mismatch < "$patch_file"
         else
             die "patchsv3: patch did not apply and upstream fix is absent: $patch_file"
         fi
@@ -218,7 +218,7 @@ apply_common_turnip_patches() {
     elif grep -Fq 'nir->info.fs.uses_sample_shading' "$shader_file"; then
         log "Common: sample-shading gate already present in $shader_file"
     else
-        patch -p1 -N --fuzz=3 --no-backup-if-mismatch < "$sample_patch"
+        patch -p1 -N -s --fuzz=3 --no-backup-if-mismatch < "$sample_patch"
     fi
 }
 
@@ -291,7 +291,7 @@ build_android() {
     log "Compiler CPU target flags for Oryon Gen 3: $oryon_arch"
 
     local opt_flags="$oryon_arch -O3 -fno-math-errno -fno-signed-zeros -fno-trapping-math -fomit-frame-pointer -fdata-sections -ffunction-sections"
-    local warn_flags="-D__ANDROID__ -Wno-error -Wno-error=gnu-empty-initializer -Wno-gnu-empty-initializer -Wno-deprecated-declarations -Wno-incompatible-pointer-types-discards-qualifiers -Wno-incompatible-pointer-types"
+    local warn_flags="-D__ANDROID__ -Wno-error -Wno-error=gnu-empty-initializer -Wno-gnu-empty-initializer -Wno-deprecated-declarations -Wno-#pragma-messages -Wno-null-conversion -Wno-incompatible-pointer-types-discards-qualifiers -Wno-incompatible-pointer-types"
 
     export CFLAGS="$opt_flags $warn_flags"
     export CXXFLAGS="$opt_flags $warn_flags"
@@ -300,8 +300,8 @@ build_android() {
     cat > android-aarch64.txt <<EOF
 [binaries]
 ar = '$NDK/llvm-ar'
-c = ['$NDK/aarch64-linux-android${cver}-clang', '$oryon_arch', '-O3', '-fno-math-errno', '-fno-signed-zeros', '-fno-trapping-math', '-fomit-frame-pointer']
-cpp = ['$NDK/aarch64-linux-android${cver}-clang++', '$oryon_arch', '-O3', '-fno-math-errno', '-fno-signed-zeros', '-fno-trapping-math', '-fomit-frame-pointer', '-fno-exceptions', '-fno-unwind-tables', '-fno-asynchronous-unwind-tables', '-fno-rtti', '--start-no-unused-arguments', '-static-libstdc++', '--end-no-unused-arguments']
+c = ['$NDK/aarch64-linux-android${cver}-clang', '$oryon_arch', '-O3', '-fno-math-errno', '-fno-signed-zeros', '-fno-trapping-math', '-fomit-frame-pointer', '-Wno-#pragma-messages', '-Wno-null-conversion', '-Wno-deprecated-declarations']
+cpp = ['$NDK/aarch64-linux-android${cver}-clang++', '$oryon_arch', '-O3', '-fno-math-errno', '-fno-signed-zeros', '-fno-trapping-math', '-fomit-frame-pointer', '-fno-exceptions', '-fno-unwind-tables', '-fno-asynchronous-unwind-tables', '-fno-rtti', '-Wno-#pragma-messages', '-Wno-null-conversion', '-Wno-deprecated-declarations', '--start-no-unused-arguments', '-static-libstdc++', '--end-no-unused-arguments']
 c_ld = '$NDK/ld.lld'
 cpp_ld = '$NDK/ld.lld'
 strip = '$NDK/llvm-strip'
@@ -369,7 +369,7 @@ package_variant() {
     case "$VARIANT" in
         a8xx-oneplus15-ultra)
             pretty_name="Turnip A840 OnePlus 15 Ultra-Eco (Android 17)"
-            desc="OnePlus 15 (SD 8 Elite Gen 5 / Adreno 840) Ultra-Eco — Low Power + High FPS, 18MB HPM Autotune, Turnip-Z Mutable UBWC, LRZ Preserve, Dying Light Profile"
+            desc="OnePlus 15 (SD 8 Elite Gen 5 / Adreno 840) Ultra-Eco — Low Power + High FPS, 18MB HPM Autotune, Turnip-Z Mutable UBWC, LRZ Preserve, Muck & Dying Light Profiles"
             suffix="A840-OnePlus15-Ultra"
             ;;
         a8xx-oneplus15-max)
