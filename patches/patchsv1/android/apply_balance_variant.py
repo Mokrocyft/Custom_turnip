@@ -38,16 +38,7 @@ HELPER_BLOCK = """
 #define KGSL_CONTEXT_PWR_CONSTRAINT 0x00080000
 #endif
 
-struct kgsl_device_constraint_pwrlevel {
-   uint32_t level;
-};
-
-struct kgsl_device_constraint {
-   uint32_t type;
-   uint32_t context_id;
-   void *data;
-   size_t size;
-};
+/* struct kgsl_device_constraint and kgsl_device_constraint_pwrlevel are provided by msm_kgsl.h */
 
 static int
 wnturnip_set_pwr_max_constraint(int fd, uint32_t context_id)
