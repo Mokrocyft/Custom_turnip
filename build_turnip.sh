@@ -100,11 +100,14 @@ apply_patchsv3_registers_only() {
 
     PYTHONPATH="$dd" python3 "$dd/a8xx_resolve_cr_cntl.py"
     PYTHONPATH="$dd" python3 "$dd/a8xx_lrz_color_mask.py"
+    PYTHONPATH="$dd" python3 "$dd/a8xx_sp_hysteresis.py"
 
     grep -Fq 'A6XXRegs.REG_A8XX_RB_RESOLVE_CR_CNTL' src/freedreno/common/freedreno_devices.py \
         || die "A8xx: RB_RESOLVE_CR_CNTL preamble missing"
     grep -Fq 'GRAS_LRZ_COLOR_COMP_MASK(CHIP, .dword = lrz_color_comp_mask)' src/freedreno/vulkan/tu_pipeline.cc \
         || die "A8xx: LRZ color mask missing"
+    grep -Fq 'SP_PS_HYSTERESIS' src/freedreno/vulkan/tu_cmd_buffer.cc \
+        || die "A8xx: SP hysteresis missing"
 }
 
 apply_a8xx_subgroup_fix() {
@@ -118,7 +121,7 @@ apply_a8xx_game_profiles() {
 }
 
 apply_a840_oneplus15_tuning() {
-    log "A840 OnePlus 15: applying Snapdragon 8 Elite Gen 5 Apex High-IPC & Race-to-Idle Suite..."
+    log "A840 OnePlus 15: applying Snapdragon 8 Elite Gen 5 Apex Max-Perf Suite..."
     python3 "$REPO_ROOT/patches/patchsv2/a8xx_shared_mem.py"
     python3 "$REPO_ROOT/patches/a8xx/a840_oneplus15_tune.py"
 }
@@ -252,7 +255,7 @@ build_android() {
     fi
     log "Compiler CPU target flags for Oryon Gen 3: $oryon_arch"
 
-    local opt_flags="$oryon_arch -O3 -fno-math-errno -fno-signed-zeros -fno-trapping-math -fomit-frame-pointer -fdata-sections -ffunction-sections"
+    local opt_flags="$oryon_arch -O3 -fno-math-errno -fno-signed-zeros -fno-trapping-math -fomit-frame-pointer -fdata-sections -ffunction-sections -fvectorize -fslp-vectorize"
     local warn_flags="-D__ANDROID__ -Wno-error -Wno-error=gnu-empty-initializer -Wno-gnu-empty-initializer -Wno-deprecated-declarations -Wno-#pragma-messages -Wno-null-conversion -Wno-incompatible-pointer-types-discards-qualifiers -Wno-incompatible-pointer-types"
 
     export CFLAGS="$opt_flags $warn_flags"
@@ -327,8 +330,8 @@ package_variant() {
     local mesa_short
     mesa_short="$(git rev-parse --short=12 HEAD)"
 
-    local pretty_name="Turnip A840 OnePlus 15 Apex (Android 17)"
-    local desc="OnePlus 15 (SD 8 Elite Gen 5 / Adreno 840) Apex High-IPC & Race-to-Idle — Gen8 ALU Latency Unlock, 16-Fetch Window, DXVK Mutable UBWC, 18MB HPM Zero-CPU GMEM, LRZ Preserve"
+    local pretty_name="Turnip A840 OnePlus 15 Apex Max-Perf (Android 17)"
+    local desc="OnePlus 15 (SD 8 Elite Gen 5 / Adreno 840) Apex Max-Perf Suite — KGSL PWR_MAX Clock Lock, Governor Downclock Disable, Turnip-Z Fast Sampling, SP Hysteresis, LRZ Rescue, 18MB HPM Zero-CPU GMEM"
     local suffix="A840-OnePlus15-Apex"
 
     local output_dir="/tmp/turnip-output"
