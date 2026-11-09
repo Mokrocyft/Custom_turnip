@@ -129,23 +129,27 @@ apply_a8xx_subgroup_fix() {
 }
 
 apply_a8xx_game_profiles() {
-    log "A8xx: installing game-specific profiles (including Dying Light 1 & 2 optimizations)..."
+    log "A8xx: installing game-specific profiles (Dying Light 1/2/The Beast, Cyberpunk, Uncharted, MIO)..."
     python3 "$REPO_ROOT/patches/a8xx/game_ssbo_profiles.py"
 }
 
 apply_a840_oneplus15_tuning() {
-    log "A840 OnePlus 15: applying Snapdragon 8 Elite Gen 5 (18MB HPM, UBWC5/6, Autotune, 64KB SharedMem) tuning..."
+    local profile="${1:-eco}"
+    log "A840 OnePlus 15: applying Snapdragon 8 Elite Gen 5 (18MB HPM, UBWC5/6, Autotune, 64KB SharedMem, profile=$profile) tuning..."
     python3 "$REPO_ROOT/patches/patchsv2/a8xx_shared_mem.py"
-    python3 "$REPO_ROOT/patches/a8xx/a840_oneplus15_tune.py"
+    OP15_POWER_PROFILE="$profile" python3 "$REPO_ROOT/patches/a8xx/a840_oneplus15_tune.py"
+    log "A840 OnePlus 15: applying Vauzi-17 / Turnip-Z / Droid-Deck super-optimizations (LRZ preserve, Mutable UBWC, IR3 scheduler, DrawState skip)..."
+    python3 "$REPO_ROOT/patches/a8xx/a840_super_optimizations.py"
 }
 
 apply_patchsv3_a8xx() {
-    log "A8xx: applying patchsv3 fixes (GPU IDs, Cat4 repeat, Process Heap Usage, LRZ, NIR 32-bit wrap, FDL num_elements)..."
+    log "A8xx: applying patchsv3 fixes (GPU IDs, Cat4 repeat, Process Heap Usage, Suspended RP Flush, LRZ, NIR 32-bit wrap, FDL num_elements)..."
     local dd="$REPO_ROOT/patches/patchsv3"
 
     PYTHONPATH="$dd/scripts" python3 "$dd/scripts/a8xx_gpu_ids.py"
     PYTHONPATH="$dd/scripts" python3 "$dd/scripts/apply_a8xx_cat4_rpt.py"
     PYTHONPATH="$dd/scripts" python3 "$dd/scripts/process_heap_usage.py"
+    PYTHONPATH="$dd/scripts" python3 "$dd/scripts/a8xx_suspended_rp_flush.py"
 
     local patch_file target marker
     for patch_file in \
@@ -236,12 +240,19 @@ configure_variant() {
             apply_Patched_android_scripts
             apply_Patched_extra_patches
             apply_patchsv3_registers_only
-            apply_a840_oneplus15_tuning
+            apply_a840_oneplus15_tuning "eco"
+            ;;
+        a8xx-oneplus15-max)
+            apply_Patched_android_scripts
+            apply_Patched_extra_patches
+            apply_patchsv3_registers_only
+            apply_a840_oneplus15_tuning "max"
             ;;
         a8xx-gen8)
             apply_Gen8_a8xx
+            apply_Patched_extra_patches
             apply_patchsv3_registers_only
-            apply_a840_oneplus15_tuning
+            apply_a840_oneplus15_tuning "eco"
             ;;
         *)
             die "Invalid VARIANT (only A8xx variants are supported): $VARIANT"
@@ -274,13 +285,15 @@ build_android() {
     export OBJCOPY=llvm-objcopy
 
     # Aggressive CPU tuning for Qualcomm Oryon Gen 3 (Snapdragon 8 Elite Gen 5 / SM8850)
+    # Using IEEE-safe math flags (-fno-math-errno -fno-signed-zeros -fno-trapping-math) without -ffinite-math-only
+    # so ir3's isnan()/INFINITY shader constant folding works without UB!
     local oryon_arch="-march=armv9.2-a+sve2+fp16+dotprod+i8mm+bf16+crc+crypto"
     if ! "$NDK/aarch64-linux-android${cver}-clang" $oryon_arch -x c -c /dev/null -o /dev/null 2>/dev/null; then
         oryon_arch="-march=armv8.6-a+fp16+dotprod+i8mm+crc+crypto"
     fi
     log "Compiler CPU target flags for Oryon Gen 3: $oryon_arch"
 
-    local opt_flags="$oryon_arch -O3 -ffast-math -fno-math-errno -fno-signed-zeros -fno-trapping-math -fomit-frame-pointer -fdata-sections -ffunction-sections"
+    local opt_flags="$oryon_arch -O3 -fno-math-errno -fno-signed-zeros -fno-trapping-math -fomit-frame-pointer -fdata-sections -ffunction-sections"
     local warn_flags="-D__ANDROID__ -Wno-error -Wno-error=gnu-empty-initializer -Wno-gnu-empty-initializer -Wno-deprecated-declarations -Wno-incompatible-pointer-types-discards-qualifiers -Wno-incompatible-pointer-types"
 
     export CFLAGS="$opt_flags $warn_flags"
@@ -290,8 +303,8 @@ build_android() {
     cat > android-aarch64.txt <<EOF
 [binaries]
 ar = '$NDK/llvm-ar'
-c = ['$NDK/aarch64-linux-android${cver}-clang', '$oryon_arch', '-O3', '-ffast-math', '-fno-math-errno', '-fno-signed-zeros', '-fno-trapping-math', '-fomit-frame-pointer']
-cpp = ['$NDK/aarch64-linux-android${cver}-clang++', '$oryon_arch', '-O3', '-ffast-math', '-fno-math-errno', '-fno-signed-zeros', '-fno-trapping-math', '-fomit-frame-pointer', '-fno-exceptions', '-fno-unwind-tables', '-fno-asynchronous-unwind-tables', '-fno-rtti', '--start-no-unused-arguments', '-static-libstdc++', '--end-no-unused-arguments']
+c = ['$NDK/aarch64-linux-android${cver}-clang', '$oryon_arch', '-O3', '-fno-math-errno', '-fno-signed-zeros', '-fno-trapping-math', '-fomit-frame-pointer']
+cpp = ['$NDK/aarch64-linux-android${cver}-clang++', '$oryon_arch', '-O3', '-fno-math-errno', '-fno-signed-zeros', '-fno-trapping-math', '-fomit-frame-pointer', '-fno-exceptions', '-fno-unwind-tables', '-fno-asynchronous-unwind-tables', '-fno-rtti', '--start-no-unused-arguments', '-static-libstdc++', '--end-no-unused-arguments']
 c_ld = '$NDK/ld.lld'
 cpp_ld = '$NDK/ld.lld'
 strip = '$NDK/llvm-strip'
@@ -358,13 +371,18 @@ package_variant() {
     local pretty_name desc suffix
     case "$VARIANT" in
         a8xx-oneplus15-ultra)
-            pretty_name="Turnip A840 OnePlus 15 Ultra (Android 17)"
-            desc="OnePlus 15 (SD 8 Elite Gen 5 / Adreno 840) Ultra — Mesa 26.3, 18MB HPM Autotune, 64KB SharedMem, Dying Light Profile, Oryon v3 ThinLTO"
+            pretty_name="Turnip A840 OnePlus 15 Ultra-Eco (Android 17)"
+            desc="OnePlus 15 (SD 8 Elite Gen 5 / Adreno 840) Ultra-Eco — Low Power + High FPS, 18MB HPM Autotune, Turnip-Z Mutable UBWC, LRZ Preserve, Dying Light Profile"
             suffix="A840-OnePlus15-Ultra"
             ;;
+        a8xx-oneplus15-max)
+            pretty_name="Turnip A840 OnePlus 15 Ultra-Max PWR_MAX (Android 17)"
+            desc="OnePlus 15 (SD 8 Elite Gen 5 / Adreno 840) WinNative-P PWR_MAX Turbo — Peak Clocks, Aggressive 18MB HPM GMEM, Turnip-Z + Vauzi-17 Suite"
+            suffix="A840-OnePlus15-MaxPerf"
+            ;;
         a8xx-gen8)
-            pretty_name="Turnip A8xx Gen8 (OnePlus 15 / Android 17)"
-            desc="A8xx Gen8 Stack + OnePlus 15 Adreno 840 18MB HPM, 64KB SharedMem & Dying Light Profile"
+            pretty_name="Turnip A8xx Gen8 + SuperOpt (OnePlus 15 / Android 17)"
+            desc="A8xx Gen8 Stack (TU_DEBUG=nocb/deck_emu) + 0001-0005 + Turnip-Z / Vauzi-17 Super-Optimizations for OnePlus 15 Adreno 840"
             suffix="A8xx-Gen8-OP15"
             ;;
     esac
@@ -377,7 +395,7 @@ package_variant() {
   "schemaVersion": 1,
   "name": "$pretty_name",
   "description": "$desc — Mesa $mesa_short",
-  "author": "Custom OnePlus 15 A840 Build",
+  "author": "Custom OnePlus 15 A840 SuperOpt",
   "packageVersion": "$BUILD_VERSION",
   "vendor": "Mesa",
   "driverVersion": "Mesa-26.3-$mesa_short",

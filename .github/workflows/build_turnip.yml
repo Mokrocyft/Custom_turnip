@@ -54,7 +54,7 @@ jobs:
           DATE=$(date -u +'%Y.%m.%d')
           HUMAN_DATE=$(date -u +'%Y-%m-%d')
           echo "tag=v${DATE}-${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
-          echo "name=Turnip A840 OnePlus 15 (Mesa 26.3 / Android 17) - ${HUMAN_DATE}" >> "$GITHUB_OUTPUT"
+          echo "name=Turnip A840 OnePlus 15 SuperOpt (Mesa 26.3 / Android 17) - ${HUMAN_DATE}" >> "$GITHUB_OUTPUT"
 
   prepare_release:
     needs: resolve
@@ -69,10 +69,11 @@ jobs:
           MESA_BRANCH: ${{ needs.resolve.outputs.mesa_branch }}
         run: |
           cat > release-notes.md <<EOF
-          Custom Android 17 (API 37) Turnip A8xx/A840 drivers built for **OnePlus 15 (Snapdragon 8 Elite Gen 5 / Adreno 840)** from Mesa \`${MESA_BRANCH}\` (\`${MESA_COMMIT}\`):
+          Custom Android 17 (API 37) Turnip A8xx/A840 SuperOpt drivers built for **OnePlus 15 (Snapdragon 8 Elite Gen 5 / Adreno 840)** from Mesa \`${MESA_BRANCH}\` (\`${MESA_COMMIT}\`):
 
-          - **Turnip A840 OnePlus 15 Ultra**: Recommended for Dying Light 1/2 (DXVK / vkd3d-proton). Includes 0001-0005 patchset, 18 MB HPM GMEM autotune, 64 KiB shared memory, UBWC 5/6 & IMapper5, LRZ/FDL/NIR 32-bit wrap fixes, and Oryon Gen 3 (\`armv9.2-a\`) + ThinLTO optimizations.
-          - **Turnip A8xx Gen8 (OP15)**: Alternative Gen8 branch configuration with OnePlus 15 18 MB HPM & 64 KiB shared memory tuning.
+          - **Turnip A840 OnePlus 15 Ultra (Eco + High FPS)**: Best balance of high framerate and low battery/thermal drain for Dying Light 1/2/The Beast. Includes 18 MB HPM smart autotune, Turnip-Z Mutable UBWC compression, Vauzi-17 LRZ preservation across FS side-effect draws, IR3 live-register pressure scheduler optimization, dynamic draw-state deduplication, 0001-0005 DX12U patches, and Oryon Gen 3 (\`armv9.2-a\`) optimizations.
+          - **Turnip A840 OnePlus 15 MaxPerf (WinNative-P PWR_MAX)**: Locks Adreno 840 to peak clocks via \`KGSL_PROP_PWR_CONSTRAINT = PWR_MAX\` with aggressive 18 MB HPM GMEM retention for maximum benchmark/heavy-scene FPS.
+          - **Turnip A8xx Gen8 (OP15)**: whitebelyash Gen8 stack (\`TU_DEBUG=nocb\` by default + \`TU_DEBUG=deck_emu\` support) combined with 100% vec4 register unlock, 0001-0005 patches, and the OnePlus 15 SuperOpt suite.
 
           All A7xx and Samsung OneUI legacy patches have been stripped.
           EOF
@@ -94,6 +95,8 @@ jobs:
         include:
           - variant: a8xx-oneplus15-ultra
             artifact: Turnip-A840-OnePlus15-Ultra
+          - variant: a8xx-oneplus15-max
+            artifact: Turnip-A840-OnePlus15-MaxPerf
           - variant: a8xx-gen8
             artifact: Turnip-A8xx-Gen8-OP15
 
@@ -174,14 +177,14 @@ jobs:
     if: ${{ success() }}
     runs-on: ubuntu-latest
     steps:
-      - name: Verify both A8xx release assets
+      - name: Verify all three A8xx release assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
         run: |
           ASSET_COUNT="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets | length')"
           echo "Release assets: $ASSET_COUNT"
-          test "$ASSET_COUNT" -eq 2
+          test "$ASSET_COUNT" -eq 3
 
       - name: Publish Release
         env:

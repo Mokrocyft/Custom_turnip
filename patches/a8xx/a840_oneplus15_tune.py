@@ -1,24 +1,26 @@
 #!/usr/bin/env python3
 """
-OnePlus 15 (Snapdragon 8 Elite Gen 5 / SM8850 / Adreno 840) Hardware & Shader Compiler Tuning.
+OnePlus 15 (Snapdragon 8 Elite Gen 5 / SM8850 / Adreno 840) Hardware, Autotune & Power Tuning.
 
-Optimizations applied:
-1. freedreno_devices.py:
-   - Ensure all Adreno 840 KGSL/speedbin chip_ids (0xffff44050A31, 0x44050A31, 0x44050A30, 0x43050A32, 0x44041430, 0x44051431) are registered.
-   - Upgrade Adreno 840 (a8xx_gen2) sysmem_ccu_depth_cache_fraction to FULL and sysmem_per_ccu_depth_cache_size to 256 KiB (matching 3-slice 18 MB HPM capacity).
-   - Increase gmem_per_ccu_color_cache_size from 16 KiB to 64 KiB and gmem_ccu_color_cache_fraction to QUARTER for 18 MB HPM so deferred lighting / G-Buffer passes in Dying Light experience higher color cache hit rates inside GMEM.
-   - Set cs_shared_mem_size = 64 * 1024 on Adreno 840.
-2. tu_knl_kgsl.cc:
-   - Ensure KGSL_UBWC_5_0 (5) and KGSL_UBWC_6_0 (6) map to 8-channel macrotile mode with bank_swizzle_levels = 0x6 on Android 16/17 kernels.
-3. tu_autotune.cc:
-   - Tune GMEM autotune thresholds for Adreno 840's 18 MB High Performance Memory (HPM):
-     keep GMEM rendering active on heavier deferred shading passes (drawcall threshold 8, bandwidth weight 9/10) to avoid premature sysmem fallbacks in Dying Light.
-4. ir3_compiler.c:
-   - Fix Adreno 840 chip_id matching in ir3_get_gpu_profile (if present from Gen8 stack) so Adreno 840 gets 100% full register file efficiency (reg_efficiency = 100 instead of 70) to prevent artificial register spilling in complex DXVK/vkd3d shaders.
+Supports two modes via env var `OP15_POWER_PROFILE`:
+- "eco" (default for `a8xx-oneplus15-ultra`):
+    * Maximizes FPS-per-Watt and lowers battery drain & heat.
+    * Uses smart GMEM autotune (drawcall threshold 8, bandwidth multiplier 9/10) so tiny passes
+      skip GMEM binning overhead while heavy deferred lighting passes stay inside the 18 MB HPM
+      (avoiding costly external LPDDR5X traffic).
+    * Keeps standard KGSL dynamic frequency scaling active (no artificial PWR_MAX lock).
+- "max" (for `a8xx-oneplus15-max` / WinNative-P style):
+    * Aggressive GMEM retention (drawcall threshold 10, bandwidth multiplier 9/10).
+    * Enables WinNative-P `KGSL_PROP_PWR_CONSTRAINT = PWR_MAX` at queue creation to lock
+      Adreno 840 at peak clocks for zero clock-drop stutters.
 """
+import os
 from pathlib import Path
 import re
 import sys
+
+power_profile = os.environ.get("OP15_POWER_PROFILE", "eco")
+print(f"a840_oneplus15_tune: configuring for OnePlus 15 profile = '{power_profile}'")
 
 # ── 1. freedreno_devices.py ──────────────────────────────────────────────────
 devices_py = Path("src/freedreno/common/freedreno_devices.py")
@@ -74,20 +76,75 @@ if devices_py.exists():
         compile(txt, str(devices_py), "exec")
         devices_py.write_text(txt, encoding="utf-8")
 
-# ── 2. tu_knl_kgsl.cc (UBWC 5 & 6 support for Android 16/17) ─────────────────
+# ── 2. tu_knl_kgsl.cc (UBWC 5/6 + optional WinNative-P PWR_MAX turbo lock) ────
 kgsl_cc = Path("src/freedreno/vulkan/tu_knl_kgsl.cc")
 if kgsl_cc.exists():
     ktxt = kgsl_cc.read_text(encoding="utf-8")
+    kchanged = False
     if "case KGSL_UBWC_4_0:" in ktxt and "case 5:" not in ktxt and "KGSL_UBWC_5_0" not in ktxt:
         ktxt = ktxt.replace(
             "case KGSL_UBWC_4_0:",
             "case KGSL_UBWC_4_0:\n   case 5:\n   case 6:",
             1
         )
-        kgsl_cc.write_text(ktxt, encoding="utf-8")
+        kchanged = True
         print("a840_oneplus15_tune: enabled UBWC_5 and UBWC_6 in tu_knl_kgsl.cc")
 
-# ── 3. ir3_compiler.c (Prevent 70% register throttling on Adreno 840) ────────
+    if power_profile == "max" and "wnturnip_set_pwr_max" not in ktxt:
+        helper_code = """
+#ifndef KGSL_PROP_PWR_CONSTRAINT
+#define KGSL_PROP_PWR_CONSTRAINT 0x12
+#define KGSL_CONSTRAINT_PWRLEVEL 1
+#define KGSL_CONSTRAINT_PWR_MAX  1
+struct kgsl_device_constraint_pwrlevel {
+   unsigned int sub_type;
+};
+struct kgsl_device_constraint {
+   unsigned int type;
+   unsigned int context_id;
+   void *data;
+   size_t size;
+};
+#endif
+
+static void
+wnturnip_set_pwr_max(int fd, uint32_t context_id)
+{
+   struct kgsl_device_constraint_pwrlevel pwr = {
+      .sub_type = KGSL_CONSTRAINT_PWR_MAX,
+   };
+   struct kgsl_device_constraint constraint = {
+      .type = KGSL_CONSTRAINT_PWRLEVEL,
+      .context_id = context_id,
+      .data = &pwr,
+      .size = sizeof(pwr),
+   };
+   struct kgsl_device_getproperty prop = {
+      .type = KGSL_PROP_PWR_CONSTRAINT,
+      .value = &constraint,
+      .sizebytes = sizeof(constraint),
+   };
+   safe_ioctl(fd, IOCTL_KGSL_SETPROPERTY, &prop);
+}
+"""
+        safe_anchor = "safe_ioctl("
+        if safe_anchor in ktxt:
+            idx = ktxt.find("\n}\n", ktxt.find(safe_anchor))
+            if idx != -1:
+                ktxt = ktxt[:idx+3] + helper_code + ktxt[idx+3:]
+                if "queue->msm_queue_id = req.drawctxt_id;" in ktxt:
+                    ktxt = ktxt.replace(
+                        "queue->msm_queue_id = req.drawctxt_id;",
+                        "queue->msm_queue_id = req.drawctxt_id;\n   wnturnip_set_pwr_max(device->fd, req.drawctxt_id);",
+                        1
+                    )
+                kchanged = True
+                print("a840_oneplus15_tune: injected WinNative-P PWR_MAX clock constraint for Max profile")
+
+    if kchanged:
+        kgsl_cc.write_text(ktxt, encoding="utf-8")
+
+# ── 3. ir3_compiler.c (Fix 32-bit switch & unlock 100% vec4 registers) ───────
 ir3_c = Path("src/freedreno/ir3/ir3_compiler.c")
 if ir3_c.exists():
     itxt = ir3_c.read_text(encoding="utf-8")
@@ -97,7 +154,6 @@ if ir3_c.exists():
         new_prof = """    case 0x43050A32: /* Adreno 840 */
     case 0x44050A31:
     case 0x44050A30:
-    case 0xffff44050A31:
         return (struct ir3_gpu_profile){100, 24, 16, false};"""
         if old_prof in itxt:
             itxt = itxt.replace(old_prof, new_prof, 1)
@@ -109,11 +165,16 @@ autotune_cc = Path("src/freedreno/vulkan/tu_autotune.cc")
 if autotune_cc.exists():
     atxt = autotune_cc.read_text(encoding="utf-8")
     achanged = False
-    for old_dc in ("if (cmd_buffer->state.rp.drawcall_count > 5)", "if (cmd_buffer->state.rp.drawcall_count > 7)"):
+    target_dc = 10 if power_profile == "max" else 8
+    for old_dc in (
+        "if (cmd_buffer->state.rp.drawcall_count > 5)",
+        "if (cmd_buffer->state.rp.drawcall_count > 7)",
+        "if (cmd_buffer->state.rp.drawcall_count > 8)",
+    ):
         if old_dc in atxt:
-            atxt = atxt.replace(old_dc, "if (cmd_buffer->state.rp.drawcall_count > 8)", 1)
+            atxt = atxt.replace(old_dc, f"if (cmd_buffer->state.rp.drawcall_count > {target_dc})", 1)
             achanged = True
-            print("a840_oneplus15_tune: tuned autotune drawcall threshold -> 8 for 18MB HPM")
+            print(f"a840_oneplus15_tune: tuned autotune drawcall threshold -> {target_dc}")
             break
     for old_bw in (
         "gmem_bandwidth = (gmem_bandwidth * 11 + total_draw_call_bandwidth) / 10;",
