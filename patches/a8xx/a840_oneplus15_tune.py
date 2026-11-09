@@ -341,7 +341,7 @@ if sched_c.exists():
       }"""
     if old_choose in stxt and "int chosen_live = 0;" not in stxt:
         # Also ensure chosen_live is declared next to chosen_rank
-        stxt = stxt.replace("unsigned chosen_rank = 0;", "unsigned chosen_rank = 0;\n   int chosen_live = 0;", 1)
+        stxt = re.sub(r"(\b(?:unsigned|int)\s+chosen_distance\b[^\n]*\n)", r"\1   int chosen_live = 0;\n", stxt, count=1)
         stxt = stxt.replace(old_choose, new_choose, 1)
         sched_c.write_text(stxt, encoding="utf-8")
         print("  [applied] IR3 scheduler live register pressure reduction in choose_instr_inc (Vauzi-17 #63)")
