@@ -1,4 +1,4 @@
-name: Build Turnip A8xx OnePlus 15 (Android 17)
+name: Build Turnip A840 OnePlus 15 Apex (Android 17)
 
 on:
   workflow_dispatch:
@@ -54,7 +54,7 @@ jobs:
           DATE=$(date -u +'%Y.%m.%d')
           HUMAN_DATE=$(date -u +'%Y-%m-%d')
           echo "tag=v${DATE}-${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
-          echo "name=Turnip A840 OnePlus 15 SuperOpt (Mesa 26.3 / Android 17) - ${HUMAN_DATE}" >> "$GITHUB_OUTPUT"
+          echo "name=Turnip A840 OnePlus 15 Apex (Mesa 26.3 / Android 17) - ${HUMAN_DATE}" >> "$GITHUB_OUTPUT"
 
   prepare_release:
     needs: resolve
@@ -69,13 +69,13 @@ jobs:
           MESA_BRANCH: ${{ needs.resolve.outputs.mesa_branch }}
         run: |
           cat > release-notes.md <<EOF
-          Custom Android 17 (API 37) Turnip A8xx/A840 SuperOpt drivers built for **OnePlus 15 (Snapdragon 8 Elite Gen 5 / Adreno 840)** from Mesa \`${MESA_BRANCH}\` (\`${MESA_COMMIT}\`):
+          Custom Android 17 (API 37) **Turnip A840 OnePlus 15 Apex** driver built for **OnePlus 15 (Snapdragon 8 Elite Gen 5 / Adreno 840)** from Mesa \`${MESA_BRANCH}\` (\`${MESA_COMMIT}\`):
 
-          - **Turnip A840 OnePlus 15 Ultra (Eco + High FPS)**: Best balance of high framerate and low battery/thermal drain for Dying Light 1/2/The Beast. Includes 18 MB HPM smart autotune, Turnip-Z Mutable UBWC compression, Vauzi-17 LRZ preservation across FS side-effect draws, IR3 live-register pressure scheduler optimization, dynamic draw-state deduplication, 0001-0005 DX12U patches, and Oryon Gen 3 (\`armv9.2-a\`) optimizations.
-          - **Turnip A840 OnePlus 15 MaxPerf (WinNative-P PWR_MAX)**: Locks Adreno 840 to peak clocks via \`KGSL_PROP_PWR_CONSTRAINT = PWR_MAX\` with aggressive 18 MB HPM GMEM retention for maximum benchmark/heavy-scene FPS.
-          - **Turnip A8xx Gen8 (OP15)**: whitebelyash Gen8 stack (\`TU_DEBUG=nocb\` by default + \`TU_DEBUG=deck_emu\` support) combined with 100% vec4 register unlock, 0001-0005 patches, and the OnePlus 15 SuperOpt suite.
-
-          All A7xx and Samsung OneUI legacy patches have been stripped.
+          - **IR3 Gen8 ALU Latency Unlock**: Fixes \`compiler->gen >= 7\` delay slots (\`2/5/1\` instead of A6xx \`3/6/2\`), eliminating 33–50% of software NOP padding between dependent ALU instructions so shaders execute faster and enter GPU sleep earlier under an FPS cap (Race-to-Idle).
+          - **IR3 Deep 16-Fetch Texture Window**: Expands in-flight \`(sy)\` texture/memory fetches from \`8 -> 16\` and \`(ss)\` from \`8 -> 12\` on Adreno 840's 128-vec4 register file, plus live-register pressure reduction (Vauzi-17 #63).
+          - **DXVK Mutable-Format UBWC Unlock**: Preserves hardware UBWC bandwidth compression on \`VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT\` textures and render targets in DXVK (*Muck*, *Dying Light*, etc.).
+          - **18 MB HPM Zero-CPU Fast-Path GMEM**: Routes render passes fitting in \`<= 2\` GMEM bins or \`>= 8\` draw calls directly into on-chip 18 MB HPM without CPU autotune hashing or GPU timestamp CS writes.
+          - **Full DCVS 1.2 GHz Boost Preserved**: No governor throttling lock, plus 128-byte UBO range coalescing, Vauzi-17 LRZ preservation (#53/#55/#60/#61), and 0001-0005 / patchsv3 stability suite.
           EOF
 
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
@@ -89,17 +89,6 @@ jobs:
     needs: [resolve, prepare_release]
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - variant: a8xx-oneplus15-ultra
-            artifact: Turnip-A840-OnePlus15-Ultra
-          - variant: a8xx-oneplus15-max
-            artifact: Turnip-A840-OnePlus15-MaxPerf
-          - variant: a8xx-gen8
-            artifact: Turnip-A8xx-Gen8-OP15
-
     steps:
       - name: Checkout Repository
         uses: actions/checkout@main
@@ -137,9 +126,9 @@ jobs:
             llvm
           pip3 install --break-system-packages --upgrade meson mako pyyaml packaging
 
-      - name: Build ${{ matrix.artifact }}
+      - name: Build Turnip A840 OnePlus 15 Apex
         env:
-          VARIANT: ${{ matrix.variant }}
+          VARIANT: a8xx-oneplus15-apex
           BUILD_VERSION: ${{ github.run_number }}
           MESA_BRANCH: ${{ needs.resolve.outputs.mesa_branch }}
           MESA_COMMIT: ${{ needs.resolve.outputs.mesa_commit }}
@@ -147,7 +136,7 @@ jobs:
           chmod +x build_turnip.sh
           ./build_turnip.sh
 
-      - name: Verify ZIP
+      - name: Verify Flat AdrenoTools ZIP
         run: |
           echo "Generated files:"
           find turnip_workdir -maxdepth 1 -type f -name "Turnip_*.zip" -print
@@ -155,13 +144,16 @@ jobs:
           unzip -t turnip_workdir/Turnip_*.zip
           unzip -p turnip_workdir/Turnip_*.zip meta.json | python3 -m json.tool
 
-      - name: Upload Artifact to Workflow Run
+      - name: Upload Flat AdrenoTools Driver Archive to Workflow Run (No Nested ZIP)
         uses: actions/upload-artifact@main
         with:
-          name: ${{ matrix.artifact }}
-          path: turnip_workdir/Turnip_*.zip
+          name: Turnip-A840-OnePlus15-Apex-V${{ github.run_number }}
+          path: |
+            /tmp/turnip-output/lib/libvulkan_freedreno.so
+            /tmp/turnip-output/lib/meta.json
+          include-hidden-files: false
 
-      - name: Upload ${{ matrix.artifact }} directly to GitHub Release
+      - name: Upload Flat AdrenoTools ZIP to GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
@@ -177,14 +169,14 @@ jobs:
     if: ${{ success() }}
     runs-on: ubuntu-latest
     steps:
-      - name: Verify all three A8xx release assets
+      - name: Verify single Apex release asset
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
         run: |
           ASSET_COUNT="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets | length')"
           echo "Release assets: $ASSET_COUNT"
-          test "$ASSET_COUNT" -eq 3
+          test "$ASSET_COUNT" -eq 1
 
       - name: Publish Release
         env:

@@ -1,13 +1,11 @@
-# Turnip A8xx / Adreno 840 SuperOpt Build — OnePlus 15 (Android 17)
+# Turnip A840 OnePlus 15 Apex (Mesa 26.3 / Android 17)
 
-Custom Android/Bionic Vulkan driver (`libvulkan_freedreno.so`) build system for **OnePlus 15 (Snapdragon 8 Elite Gen 5 / SM8850 / Adreno 840)** targeting **Android 17 (API 37)** and Mesa `staging/26.3`.
+Единая флагманская сборка Vulkan-драйвера Turnip (`libvulkan_freedreno.so`) специально для **OnePlus 15 (Snapdragon 8 Elite Gen 5 / SM8850 / Adreno 840 GPU / Oryon Gen 3 CPU)** под **Android 17 (API 37)** из ветки `staging/26.3`.
 
-Combines patches and optimizations from **WinNative (`WN-Turnip -b / -p`)**, **Vauzi-17 (`-win` / `-sw` series)**, **Turnip-Z (`30`–`32`)**, **Droid-Deck (`DD-Turnip`)**, and **Banners-Turnip (`A8xx`)**. All legacy A7xx and Samsung OneUI patches have been removed.
-
-## Build Variants (3-Pack)
-
-| Variant | Artifact | Power & Performance Profile |
-| --- | --- | --- |
-| `a8xx-oneplus15-ultra` | `Turnip-A840-OnePlus15-Ultra` | **Recommended for Dying Light 1/2/The Beast (High FPS + Low Power/Heat)**. Standard KGSL dynamic clocks + 18 MB HPM smart autotune (threshold `8`), Turnip-Z Mutable UBWC compression, Vauzi-17 LRZ preservation across FS side-effect draws, IR3 live-register pressure scheduler optimization, dynamic draw-state deduplication, 0001–0005 DX12U patches, and Oryon Gen 3 (`armv9.2-a`) optimizations. |
-| `a8xx-oneplus15-max` | `Turnip-A840-OnePlus15-MaxPerf` | **WinNative-P (`PWR_MAX`) Turbo Mode**. Locks Adreno 840 to peak clocks via `KGSL_PROP_PWR_CONSTRAINT = PWR_MAX` at queue creation with aggressive 18 MB HPM GMEM retention (threshold `10`). Maximum FPS for short benchmarks or heavy scenes with active cooling. |
-| `a8xx-gen8` | `Turnip-A8xx-Gen8-OP15` | **Gen8 IMR / No-Concurrent-Binning Stack**. Uses `a8xx_gen8.patch` (`TU_DEBUG=nocb` default + `TU_DEBUG=deck_emu` Steam Deck spoofing support) with fixed 32-bit `ir3_get_gpu_profile`, 100% vec4 register unlock on Adreno 840, 0001–0005 patches, and the SuperOpt suite. |
+## Ключевые технологии (High-IPC & Race-to-Idle)
+- **IR3 Gen8 ALU Latency Unlock (`ir3_compiler.c`)**: исправляет проверку `compiler->gen == 7` на `compiler->gen >= 7`, активируя задержки `2/5/1` вместо устаревших `3/6/2` (A6xx) и убирая 33–50% пустых инструкций `nop` между зависимыми ALU-операциями.
+- **IR3 Deep 16-Fetch Texture Window (`ir3_sched.c`)**: расширяет очередь одновременных выборок текстур/памяти `(sy)` с `8` до `16` и `(ss)` с `8` до `12` для 128-векторного регистрового файла Adreno 840 + минимизация регистрового давления (`choose_instr_inc`, Vauzi-17 #63).
+- **DXVK Mutable-Format UBWC Unlock (`tu_image.cc`)**: сохраняет аппаратное сжатие полосы пропускания **UBWC** на текстурах и рендер-таргетах с флагом `VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT` в играх на DXVK (*Muck*, *Dying Light* и др.) + тайлинг `TILE6_3` для `DRM_FORMAT_MOD_QCOM_COMPRESSED` (Turnip-Z #30).
+- **18 MB HPM Zero-CPU Fast-Path GMEM (`tu_cmd_buffer.cc` & `tu_autotune.cc`)**: рендер-пассы, помещающиеся в `<= 2` тайла 18 МБ HPM или содержащие `>= 8` вызовов отрисовки, направляются напрямую в накристальную память GMEM/HPM без накладных расходов CPU на хэширование autotune и без записи GPU timestamp-пакетов.
+- **Smart A2C Gate (`tu_pipeline.cc`) & Game Profiles (`00-turnip-defaults.conf`)**: блокирует тяжелую шейдерную эмуляцию Alpha-to-Coverage на 1x MSAA и активирует аппаратный A2C + `bandwidth` autotune для `DXVK|vkd3d`, `Unity.*`, *Muck* и *Dying Light*.
+- **Плоский архив без вложенности**: как в GitHub Releases, так и во вкладке GitHub Actions Artifacts формируется готовый к установке в AdrenoTools плоский ZIP-архив (`libvulkan_freedreno.so` + `meta.json` в корне, без «архива в архиве»).

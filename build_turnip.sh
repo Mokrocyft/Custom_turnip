@@ -11,7 +11,7 @@ NDKVER="${NDKVER:-android-ndk-r30}"
 NDK_FALLBACK="android-ndk-r29"
 NDK="$WORKDIR/$NDKVER/toolchains/llvm/prebuilt/linux-x86_64/bin"
 BUILD_VERSION="${BUILD_VERSION:-1.0}"
-VARIANT="${VARIANT:-a8xx-oneplus15-ultra}"
+VARIANT="${VARIANT:-a8xx-oneplus15-apex}"
 MESA_BRANCH="${MESA_BRANCH:-staging/26.3}"
 MESA_COMMIT="${MESA_COMMIT:-}"
 
@@ -55,22 +55,6 @@ prepare_workdir() {
         fi
     fi
     git -C "$WORKDIR/mesa" checkout -q --detach FETCH_HEAD
-}
-
-apply_Gen8_a8xx() {
-    log "A8xx Gen8: applying turnip/gen8 stack..."
-    patch -p1 -N -s --fuzz=4 --no-backup-if-mismatch < "$REPO_ROOT/patches/patchsv2/a8xx_gen8.patch" >/dev/null 2>&1 || true
-    find src -type f \( -name "*.rej" -o -name "*.orig" \) -delete
-    python3 -m py_compile src/freedreno/common/freedreno_devices.py || die "freedreno_devices.py syntax error after a8xx_gen8.patch"
-    python3 "$REPO_ROOT/patches/patchsv1/android/apply_a8xx_gpus.py"
-
-    log "A8xx Gen8: shared memory 32 KiB -> 64 KiB..."
-    python3 "$REPO_ROOT/patches/patchsv2/a8xx_shared_mem.py"
-
-    log "A8xx Gen8: enabling modern Qualcomm gralloc, IMapper5 and UBWC..."
-    python3 "$REPO_ROOT/patches/patchsv1/android/fix_gralloc_flushall.py"
-    python3 "$REPO_ROOT/patches/patchsv1/android/add_aimapper_gralloc.py"
-    python3 "$REPO_ROOT/patches/patchsv1/android/add_ubwc_swapchain_usage.py"
 }
 
 apply_Patched_android_scripts() {
@@ -134,10 +118,9 @@ apply_a8xx_game_profiles() {
 }
 
 apply_a840_oneplus15_tuning() {
-    local profile="${1:-eco}"
-    log "A840 OnePlus 15: applying Snapdragon 8 Elite Gen 5 (18MB HPM, UBWC5/6, Autotune, 64KB SharedMem, profile=$profile) tuning..."
+    log "A840 OnePlus 15: applying Snapdragon 8 Elite Gen 5 Apex High-IPC & Race-to-Idle Suite..."
     python3 "$REPO_ROOT/patches/patchsv2/a8xx_shared_mem.py"
-    OP15_POWER_PROFILE="$profile" python3 "$REPO_ROOT/patches/a8xx/a840_oneplus15_tune.py"
+    python3 "$REPO_ROOT/patches/a8xx/a840_oneplus15_tune.py"
 }
 
 apply_patchsv3_a8xx() {
@@ -232,29 +215,10 @@ apply_android_ndk_fixes() {
 }
 
 configure_variant() {
-    case "$VARIANT" in
-        a8xx-oneplus15-ultra)
-            apply_Patched_android_scripts
-            apply_Patched_extra_patches
-            apply_patchsv3_registers_only
-            apply_a840_oneplus15_tuning "eco"
-            ;;
-        a8xx-oneplus15-max)
-            apply_Patched_android_scripts
-            apply_Patched_extra_patches
-            apply_patchsv3_registers_only
-            apply_a840_oneplus15_tuning "max"
-            ;;
-        a8xx-gen8)
-            apply_Gen8_a8xx
-            apply_Patched_extra_patches
-            apply_patchsv3_registers_only
-            apply_a840_oneplus15_tuning "eco"
-            ;;
-        *)
-            die "Invalid VARIANT (only A8xx variants are supported): $VARIANT"
-            ;;
-    esac
+    apply_Patched_android_scripts
+    apply_Patched_extra_patches
+    apply_patchsv3_registers_only
+    apply_a840_oneplus15_tuning
 }
 
 build_android() {
@@ -282,8 +246,6 @@ build_android() {
     export OBJCOPY=llvm-objcopy
 
     # Aggressive CPU tuning for Qualcomm Oryon Gen 3 (Snapdragon 8 Elite Gen 5 / SM8850)
-    # Using IEEE-safe math flags (-fno-math-errno -fno-signed-zeros -fno-trapping-math) without -ffinite-math-only
-    # so ir3's isnan()/INFINITY shader constant folding works without UB!
     local oryon_arch="-march=armv9.2-a+sve2+fp16+dotprod+i8mm+bf16+crc+crypto"
     if ! "$NDK/aarch64-linux-android${cver}-clang" $oryon_arch -x c -c /dev/null -o /dev/null 2>/dev/null; then
         oryon_arch="-march=armv8.6-a+fp16+dotprod+i8mm+crc+crypto"
@@ -329,7 +291,7 @@ endian = 'little'
 EOF
 
     local build_dir="build-android-aarch64"
-    local output_dir="/tmp/turnip-$VARIANT"
+    local output_dir="/tmp/turnip-output"
     rm -rf "$build_dir" "$output_dir"
 
     meson setup "$build_dir" \
@@ -365,26 +327,11 @@ package_variant() {
     local mesa_short
     mesa_short="$(git rev-parse --short=12 HEAD)"
 
-    local pretty_name desc suffix
-    case "$VARIANT" in
-        a8xx-oneplus15-ultra)
-            pretty_name="Turnip A840 OnePlus 15 Ultra-Eco (Android 17)"
-            desc="OnePlus 15 (SD 8 Elite Gen 5 / Adreno 840) Ultra-Eco — Low Power + High FPS, 18MB HPM Autotune, Turnip-Z Mutable UBWC, LRZ Preserve, Muck & Dying Light Profiles"
-            suffix="A840-OnePlus15-Ultra"
-            ;;
-        a8xx-oneplus15-max)
-            pretty_name="Turnip A840 OnePlus 15 Ultra-Max PWR_MAX (Android 17)"
-            desc="OnePlus 15 (SD 8 Elite Gen 5 / Adreno 840) WinNative-P PWR_MAX Turbo — Peak Clocks, Aggressive 18MB HPM GMEM, Turnip-Z + Vauzi-17 Suite"
-            suffix="A840-OnePlus15-MaxPerf"
-            ;;
-        a8xx-gen8)
-            pretty_name="Turnip A8xx Gen8 + SuperOpt (OnePlus 15 / Android 17)"
-            desc="A8xx Gen8 Stack (TU_DEBUG=nocb/deck_emu) + 0001-0005 + Turnip-Z / Vauzi-17 Super-Optimizations for OnePlus 15 Adreno 840"
-            suffix="A8xx-Gen8-OP15"
-            ;;
-    esac
+    local pretty_name="Turnip A840 OnePlus 15 Apex (Android 17)"
+    local desc="OnePlus 15 (SD 8 Elite Gen 5 / Adreno 840) Apex High-IPC & Race-to-Idle — Gen8 ALU Latency Unlock, 16-Fetch Window, DXVK Mutable UBWC, 18MB HPM Zero-CPU GMEM, LRZ Preserve"
+    local suffix="A840-OnePlus15-Apex"
 
-    local output_dir="/tmp/turnip-$VARIANT"
+    local output_dir="/tmp/turnip-output"
     cd "$output_dir/lib"
 
     cat > meta.json <<EOF
@@ -392,7 +339,7 @@ package_variant() {
   "schemaVersion": 1,
   "name": "$pretty_name",
   "description": "$desc — Mesa $mesa_short",
-  "author": "Custom OnePlus 15 A840 SuperOpt",
+  "author": "Custom OnePlus 15 A840 Apex",
   "packageVersion": "$BUILD_VERSION",
   "vendor": "Mesa",
   "driverVersion": "Mesa-26.3-$mesa_short",
@@ -404,7 +351,7 @@ EOF
     local zip_name="Turnip_${suffix}_V${BUILD_VERSION}_${mesa_short}.zip"
     rm -f "$WORKDIR/$zip_name"
     zip -9 -q "$WORKDIR/$zip_name" libvulkan_freedreno.so meta.json
-    log "Generated: $WORKDIR/$zip_name"
+    log "Generated flat AdrenoTools package: $WORKDIR/$zip_name"
 }
 
 main() {

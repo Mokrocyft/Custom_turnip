@@ -1,23 +1,42 @@
 #!/usr/bin/env python3
 """
-OnePlus 15 (Snapdragon 8 Elite Gen 5 / SM8850 / Adreno 840) Next-Gen Custom Optimization
-& Ultra-Low-Power Suite for Mesa 26.3 (`staging/26.3`).
+OnePlus 15 (Snapdragon 8 Elite Gen 5 / SM8850 / Adreno 840) "Apex" High-IPC & Race-to-Idle
+Optimization Suite for Mesa 26.3 (`staging/26.3`).
 
-Combines custom technologies and verified source-level patches from:
-  - Custom Adreno 840 18MB HPM Energy-Aware Autotune (7/10 Eco, 6/10 MaxPerf)
-  - Custom Adreno 840 UBO Range Coalescing (128B Eco / 256B MaxPerf gap merging into constant RAM)
-  - Vauzi-17/710 (#53, #55, #60, #61, #62, #63) with flexible Mesa 26.3 regex anchors
-  - Turnip-Z (#30 Mutable UBWC TILE6_3)
-  - K11MCH1 / Droid-Deck (A8xx suspended render-pass CCU flush)
-  - NOTE: KGSL_PROP_PWRCTRL=0 is intentionally NOT used because it disables Qualcomm DCVS
-    frequency scaling on Snapdragon 8 Elite Gen 5 and locks Adreno 840 below peak 1.2 GHz!
+Engineered specifically to maximize instructions-per-clock (IPC) and memory efficiency on
+Adreno 840 (3 slices, 6 CCUs, 128 vec4 GPRs, 18 MB High Performance Memory / HPM) so that:
+  - Uncapped: Delivers maximum possible framerate with full Qualcomm DCVS 1.2 GHz boost.
+  - FPS-Locked (e.g. 60/90/120 FPS): Finishes frame execution much faster and enters GPU
+    power-gating sleep earlier ("Race-to-Idle"), cutting heat and battery consumption in
+    Muck, Dying Light, and all DXVK/VKD3D/Unity titles.
+
+Key Technologies & Exact Mesa 26.3 Optimizations:
+  1. [IR3 Gen8 ALU Latency Unlock] (`ir3_compiler.c`): Fixes `compiler->gen == 7` -> `>= 7`
+     so Adreno 840 (`gen == 8`) uses 2/5/1 delay slots instead of A6xx 3/6/2 delay slots,
+     eliminating 33-50% of software NOP padding between dependent ALU ops.
+  2. [IR3 Deep Texture Fetch Window] (`ir3_sched.c`): Expands `should_defer` in-flight `(sy)`
+     texture/memory fetch queue from 8 -> 16 and `(ss)` queue from 8 -> 12 on 128-vec4 A840,
+     plus `choose_instr_inc` live-register pressure reduction (Vauzi-17 #63).
+  3. [DXVK Mutable-Format UBWC Unlock] (`tu_image.cc`): Keeps UBWC bandwidth compression
+     enabled on `VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT` images when `format_list_ubwc_possible`
+     passes and `!r8g8_r16 && !fmt_list_has_swaps` (unlocking UBWC on DXVK TYPELESS textures
+     and render targets in Muck & Dying Light), plus `TILE6_3` on `QCOM_COMPRESSED` (#30).
+  4. [18 MB HPM Zero-CPU Fast-Path GMEM] (`tu_cmd_buffer.cc` & `tu_autotune.cc`):
+     - In `use_sysmem_rendering`: passes with >= 5 draws fitting in <= 2 GMEM bins go
+       straight to 18 MB HPM GMEM, skipping CPU autotune hashing and GPU timestamp CS writes.
+     - In `tu_autotune::get_optimal_mode`: early-returns GMEM for `drawcall_count >= 8`,
+       lowers small-RP threshold `< 5` -> `< 4`, and sets bandwidth multiplier to `6/10`.
+  5. [Smart A2C Shader Gate] (`tu_pipeline.cc`): Guards `emulate_alpha_to_coverage` so 1x MSAA
+     passes never get bloated with shader-based Alpha-to-Coverage emulation.
+  6. [128-Byte UBO Range Coalescing] (`ir3_nir_analyze_ubo_ranges.c`): Merges nearby UBO loads
+     within 128 bytes into contiguous `ldc.k` preamble constant register uploads.
+  7. [LRZ Preservation & Fast Subpass Sync] (`tu_lrz.cc` & `tu_cmd_buffer.cc`): Vauzi-17
+     #53, #55, #60 (`WFI` -> `CP_WAIT_FOR_ME`), #61, plus K11MCH1 suspended RP CCU flush.
 """
-import os
 from pathlib import Path
 import re
 
-power_profile = os.environ.get("OP15_POWER_PROFILE", "eco")
-print(f"a840_oneplus15_tune: configuring OnePlus 15 Adreno 840 Next-Gen Suite (profile = '{power_profile}')")
+print("a840_oneplus15_tune: applying OnePlus 15 Adreno 840 Apex High-IPC & Race-to-Idle Suite")
 
 # ── 1. freedreno_devices.py (Adreno 840 18MB HPM Cache + KGSL IDs) ───────────
 devices_py = Path("src/freedreno/common/freedreno_devices.py")
@@ -71,7 +90,7 @@ if devices_py.exists():
         compile(txt, str(devices_py), "exec")
         devices_py.write_text(txt, encoding="utf-8")
 
-# ── 2. tu_knl_kgsl.cc (UBWC 5/6 without breaking DCVS boost!) ─────────────────
+# ── 2. tu_knl_kgsl.cc (UBWC 5/6 with Full DCVS Boost Preserved) ──────────────
 kgsl_cc = Path("src/freedreno/vulkan/tu_knl_kgsl.cc")
 if kgsl_cc.exists():
     ktxt = kgsl_cc.read_text(encoding="utf-8")
@@ -84,11 +103,30 @@ if kgsl_cc.exists():
         kgsl_cc.write_text(ktxt, encoding="utf-8")
         print("  [applied] UBWC_5 and UBWC_6 enabled in tu_knl_kgsl.cc")
 
-# ── 3. ir3_compiler.c & UBO Range Coalescing for Adreno 840 ──────────────────
+# ── 3. ir3_compiler.c (Gen8 ALU Delay Slot Unlock: gen == 7 -> gen >= 7) ─────
 ir3_c = Path("src/freedreno/ir3/ir3_compiler.c")
 if ir3_c.exists():
     itxt = ir3_c.read_text(encoding="utf-8")
     ichanged = False
+
+    # Critical Mesa 26.3 fix: Adreno 840 is gen == 8, so `if (compiler->gen == 7)` skipped it
+    # and left A6xx delay slots (3/6/2) active! Enabling `compiler->gen >= 7` sets 2/5/1 delay
+    # slots and removes 33-50% of software NOP padding between dependent ALU ops!
+    old_delay = """   if (compiler->gen == 7) {
+      compiler->delay_slots.alu_to_alu = 2;
+      compiler->delay_slots.non_alu = 5;
+      compiler->delay_slots.cat3_src2_read = 1;
+   }"""
+    new_delay = """   if (compiler->gen >= 7) {
+      compiler->delay_slots.alu_to_alu = 2;
+      compiler->delay_slots.non_alu = 5;
+      compiler->delay_slots.cat3_src2_read = 1;
+   }"""
+    if old_delay in itxt:
+        itxt = itxt.replace(old_delay, new_delay, 1)
+        ichanged = True
+        print("  [applied] Unlocked Gen8 ALU/Cat3 low delay slots (2/5/1 instead of 3/6/2) in ir3_compiler.c")
+
     if "ir3_get_gpu_profile" in itxt:
         old_prof = """    case 0x43050A32: /* Adreno 840 */
         return (struct ir3_gpu_profile){70, 20, 16, true};"""
@@ -101,93 +139,166 @@ if ir3_c.exists():
             ichanged = True
             print("  [applied] Unlocked 100% vec4 register efficiency for Adreno 840 in ir3_compiler.c")
 
-    itxt, n_coal = re.subn(
-        r"(compiler->coalesce_ubo_push_ranges\s*=\s*)[^;]+;",
-        r"\1(compiler->gen >= 8);",
-        itxt,
-        count=1,
-    )
-    if n_coal:
-        ichanged = True
-        print("  [applied] Enabled UBO push range coalescing for all Gen8 / Adreno 840 in ir3_compiler.c")
-
     if ichanged:
         ir3_c.write_text(itxt, encoding="utf-8")
 
+# ── 4. ir3_nir_analyze_ubo_ranges.c (128-Byte UBO Range Coalescing) ──────────
 ubo_c = Path("src/freedreno/ir3/ir3_nir_analyze_ubo_ranges.c")
 if ubo_c.exists():
     utxt = ubo_c.read_text(encoding="utf-8")
-    ubo_gap = 256 if power_profile == "max" else 128
     old_gap = "if (r.start > plan_r->end || r.end < plan_r->start)\n         continue;"
     new_gap = (
-        f"/* Custom Adreno 840 optimization: coalesce nearby UBO loads within {ubo_gap} bytes\n"
+        "/* Custom Adreno 840 optimization: coalesce nearby UBO loads within 128 bytes (8 vec4s)\n"
         "       * into the constant file to eliminate memory-backed LDC instructions in DXVK! */\n"
         "      uint32_t gap = (plan_r->end < r.start) ? (r.start - plan_r->end) :\n"
         "                     ((r.end < plan_r->start) ? (plan_r->start - r.end) : 0);\n"
-        f"      if (gap > {ubo_gap})\n"
+        "      if (gap > 128)\n"
         "         continue;"
     )
-    if old_gap in utxt and f"gap > {ubo_gap}" not in utxt:
+    if old_gap in utxt and "gap > 128" not in utxt:
         utxt = utxt.replace(old_gap, new_gap, 1)
         old_neigh = "if (a->start > b->end || a->end < b->start)\n         continue;"
         new_neigh = (
             "uint32_t gap = (a->end < b->start) ? (b->start - a->end) :\n"
             "                     ((b->end < a->start) ? (a->start - b->end) : 0);\n"
-            f"      if (gap > {ubo_gap})\n"
+            "      if (gap > 128)\n"
             "         continue;"
         )
         if old_neigh in utxt:
             utxt = utxt.replace(old_neigh, new_neigh, 1)
         ubo_c.write_text(utxt, encoding="utf-8")
-        print(f"  [applied] Custom {ubo_gap}-byte UBO range coalescing in ir3_nir_analyze_ubo_ranges.c")
+        print("  [applied] Custom 128-byte UBO range coalescing in ir3_nir_analyze_ubo_ranges.c")
 
-# ── 4. tu_autotune.cc (Custom Energy-Aware 18MB HPM Autotuner for Muck & Dying Light) ──
+# ── 5. ir3_sched.c (Deep 16-Fetch Texture Window + Live Register Reduction) ──
+sched_c = Path("src/freedreno/ir3/ir3_sched.c")
+if sched_c.exists():
+    stxt = sched_c.read_text(encoding="utf-8")
+    schanged = False
+
+    # 5a. Expand in-flight (sy) texture/memory fetch limit from 8 -> 16 and (ss) from 8 -> 12
+    # on Adreno 840 (which has 128 vec4 GPRs and 6 CCUs across 3 slices)
+    old_defer = """   if (ctx->sy_index - ctx->first_outstanding_sy_index >= 8 && is_sy_producer(instr))
+      return true;
+
+   if (ctx->ss_index - ctx->first_outstanding_ss_index >= 8 && is_ss_producer(instr))
+      return true;"""
+    new_defer = """   if (ctx->sy_index - ctx->first_outstanding_sy_index >= 16 && is_sy_producer(instr))
+      return true;
+
+   if (ctx->ss_index - ctx->first_outstanding_ss_index >= 12 && is_ss_producer(instr))
+      return true;"""
+    if old_defer in stxt:
+        stxt = stxt.replace(old_defer, new_defer, 1)
+        schanged = True
+        print("  [applied] Expanded IR3 in-flight texture/memory (sy) window 8 -> 16 and (ss) 8 -> 12 in ir3_sched.c")
+
+    # 5b. Vauzi-17 #63: Live register pressure minimization in choose_instr_inc
+    old_choose = """      unsigned distance = nearest_use(n->instr);
+
+      if (!chosen || rank > chosen_rank ||
+          (rank == chosen_rank && distance < chosen_distance)) {
+         chosen = n;
+         chosen_distance = distance;
+         chosen_rank = rank;
+      }"""
+    new_choose = """      unsigned distance = nearest_use(n->instr);
+      int live = live_effect(n->instr);
+
+      bool better = !chosen || rank > chosen_rank;
+      if (!better && rank == chosen_rank) {
+         if (live < chosen_live)
+            better = true;
+         else if (live == chosen_live && distance < chosen_distance)
+            better = true;
+      }
+
+      if (better) {
+         chosen = n;
+         chosen_distance = distance;
+         chosen_rank = rank;
+         chosen_live = live;
+      }"""
+    if old_choose in stxt and "int chosen_live = 0;" not in stxt:
+        stxt = re.sub(r"(\b(?:unsigned|int)\s+chosen_distance\b[^\n]*\n)", r"\1   int chosen_live = 0;\n", stxt, count=1)
+        stxt = stxt.replace(old_choose, new_choose, 1)
+        schanged = True
+        print("  [applied] IR3 scheduler live register pressure reduction in choose_instr_inc (Vauzi-17 #63)")
+
+    if schanged:
+        sched_c.write_text(stxt, encoding="utf-8")
+
+# ── 6. tu_autotune.cc (18MB HPM Early GMEM Fast-Path & Bandwidth Factor) ─────
 autotune_cc = Path("src/freedreno/vulkan/tu_autotune.cc")
 if autotune_cc.exists():
     atxt = autotune_cc.read_text(encoding="utf-8")
     achanged = False
 
-    # Stronger GMEM preference: 7/10 in Ultra/Eco (keeps passes in 18MB HPM to save LPDDR5X battery),
-    # 6/10 in MaxPerf (maximizes on-chip HPM bandwidth for peak FPS).
-    bw_mult = 6 if power_profile == "max" else 7
+    # 6a. Lower GMEM bandwidth multiplier to 6/10 for 18MB HPM
     atxt, n_bw = re.subn(
-        r"gmem_bandwidth\s*=\s*\(\s*gmem_bandwidth\s*\*\s*(?:8|9|10|11)\s*\+\s*total_draw_call_bandwidth\s*\)\s*/\s*10\s*;",
-        f"gmem_bandwidth = (gmem_bandwidth * {bw_mult} + total_draw_call_bandwidth) / 10;",
+        r"gmem_bandwidth\s*=\s*\(\s*gmem_bandwidth\s*\*\s*(?:7|8|9|10|11)\s*\+\s*total_draw_call_bandwidth\s*\)\s*/\s*10\s*;",
+        "gmem_bandwidth = (gmem_bandwidth * 6 + total_draw_call_bandwidth) / 10;",
         atxt,
         count=1,
     )
     if n_bw:
         achanged = True
-        print(f"  [applied] Energy-Aware 18MB HPM GMEM bandwidth factor -> {bw_mult}/10 in tu_autotune.cc")
+        print("  [applied] Energy-Aware 18MB HPM GMEM bandwidth factor -> 6/10 in tu_autotune.cc")
 
-    atxt, n_dc = re.subn(r"(drawcall_count\s*[<>]=?\s*)(?:5|10)\b", r"\g<1>6", atxt, count=1)
-    if n_dc:
+    # 6b. Lower small RP threshold from < 5 to < 4 so 4+ drawcall passes can enter 18MB HPM GMEM
+    if "rp_state->drawcall_count < 5" in atxt:
+        atxt = atxt.replace("rp_state->drawcall_count < 5", "rp_state->drawcall_count < 4", 1)
         achanged = True
-        print("  [applied] Tuned Mesa 26.3 drawcall_count bypass threshold -> 6 for 18MB HPM")
+        print("  [applied] Lowered small renderpass bypass threshold 5 -> 4 in tu_autotune.cc")
 
-    hist_target = "1" if power_profile == "max" else "2"
-    atxt, n_hist = re.subn(r"(history_size\s*=\s*)(?:4|5)\b", rf"\g<1>{hist_target}", atxt, count=1)
-    if n_hist:
+    # 6c. Early-return GMEM for passes with >= 8 draw calls in tu_autotune::get_optimal_mode,
+    # avoiding CPU mutex/hash-table lookups and GPU timestamp packet writes per render pass!
+    old_early = """      if (config.test(mod_flag::BIG_GMEM) && rp_state->drawcall_count >= 10) {
+         early_return_reason = "TU_AUTOTUNE_FLAGS=big_gmem";
+         return render_mode::GMEM;
+      }"""
+    new_early = """      if (!config.is_enabled(algorithm::PREFER_SYSMEM) && rp_state->drawcall_count >= 8) {
+         early_return_reason = "A840 18MB HPM early GMEM";
+         return render_mode::GMEM;
+      }"""
+    if old_early in atxt:
+        atxt = atxt.replace(old_early, new_early, 1)
         achanged = True
-        print(f"  [applied] Reduced autotune history window -> {hist_target} frame(s) for instant adaptation")
+        print("  [applied] Enabled zero-CPU early GMEM fast-path for >= 8 drawcall passes in tu_autotune.cc")
 
     if achanged:
         autotune_cc.write_text(atxt, encoding="utf-8")
 
-# ── 5. Exact Mesa 26.3 Vauzi-17 / Turnip-Z / Droid-Deck Optimizations ────────
-
-# 5a. Vauzi-17 #60: Relax subpass slice wait from WFI (Wait For Idle) to WAIT_FOR_ME in sysmem mode
+# ── 7. tu_cmd_buffer.cc (Zero-CPU <=2-Bin GMEM Fast-Path + WFI->WAIT_FOR_ME) ──
 cmd_cc = Path("src/freedreno/vulkan/tu_cmd_buffer.cc")
 if cmd_cc.exists():
     ctxt = cmd_cc.read_text(encoding="utf-8")
     cchanged = False
 
+    # 7a. Fast-path passes with >= 5 draws that fit in <= 2 tiles of Adreno 840's 18MB HPM GMEM
+    # directly into GMEM without calling autotune hash/history!
+    old_sysmem_call = """   tu_autotune::render_mode optimal_mode =
+      cmd->device->autotune->get_optimal_mode(cmd, rp_ctx, rp_key);"""
+    new_sysmem_call = """   if (cmd->state.rp.drawcall_count >= 5 &&
+       (cmd->state.tiling->nbins_x * cmd->state.tiling->nbins_y) <= 2) {
+      *rp_ctx = nullptr;
+      return false;
+   }
+
+   tu_autotune::render_mode optimal_mode =
+      cmd->device->autotune->get_optimal_mode(cmd, rp_ctx, rp_key);"""
+    if old_sysmem_call in ctxt and "cmd->state.tiling->nbins_x * cmd->state.tiling->nbins_y" not in ctxt:
+        ctxt = ctxt.replace(old_sysmem_call, new_sysmem_call, 1)
+        cchanged = True
+        print("  [applied] Added <=2-bin 18MB HPM GMEM zero-CPU fast-path in tu_cmd_buffer.cc")
+
+    # 7b. Vauzi-17 #60: Relax subpass slice wait from WFI to CP_WAIT_FOR_ME
     wfi_pat = re.compile(r'(if\s*\(\s*emit_subpass_slice_wait\s*\)\s*)\n(\s*)tu_cs_emit_wfi\s*\(\s*cs\s*\)\s*;')
     if wfi_pat.search(ctxt):
         ctxt = wfi_pat.sub(r'\1\n\2tu_cs_emit_pkt7(cs, CP_WAIT_FOR_ME, 0);', ctxt, count=1)
         cchanged = True
         print("  [applied] Relaxed subpass slice wait from WFI to CP_WAIT_FOR_ME (#60)")
 
+    # 7c. K11MCH1: A8xx CCU flush before suspended render pass chain resume
     susp_pat = re.compile(r'(if\s*\(\s*cmd->state\.suspended\s*\)\s*\{\s*\n\s*tu_emit_event_write<CHIP>\s*\(\s*cmd\s*,\s*&cmd->cs\s*,\s*FD_CACHE_CLEAN\s*\)\s*;)')
     if susp_pat.search(ctxt) and "FD_CCU_FLUSH_COLOR" not in ctxt[ctxt.find("cmd->state.suspended"):ctxt.find("cmd->state.suspended")+350]:
         ctxt = susp_pat.sub(
@@ -201,7 +312,68 @@ if cmd_cc.exists():
     if cchanged:
         cmd_cc.write_text(ctxt, encoding="utf-8")
 
-# 5b. Vauzi-17 #61 & #55 & #53: LRZ preservation in src/freedreno/vulkan/tu_lrz.cc
+# ── 8. tu_image.cc (Unlock UBWC on DXVK Mutable Format Images + QCOM_COMPRESSED) ──
+img_cc = Path("src/freedreno/vulkan/tu_image.cc")
+if img_cc.exists():
+    imtxt = img_cc.read_text(encoding="utf-8")
+    imchanged = False
+
+    # 8a. Unlock UBWC on VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT when fmt_list has no swaps/r8g8_r16
+    # and all formats pass format_list_ubwc_possible(device, fmt_list, pCreateInfo)!
+    # In vanilla Mesa 26.3, `!mutable_ubwc_fc` unconditionally sets `ubwc_enabled = false;`
+    # on nearly every DXVK texture and render target!
+    mut_pat = re.compile(
+        r"\}\s*else\s+if\s*\(\s*!mutable_ubwc_fc\s*\)\s*\{\s*"
+        r"if\s*\(\s*ubwc_enabled\s*\)\s*\{.*?\n\s*ubwc_enabled\s*=\s*false\s*;\s*\}\s*"
+        r"(bool\s+r8g8_r16\s*=\s*format_list_reinterprets_r8g8_r16\([^;]+;\s*"
+        r"bool\s+fmt_list_has_swaps\s*=\s*format_list_has_swaps\([^;]+;\s*"
+        r"if\s*\(\s*r8g8_r16\s*\|\|\s*fmt_list_has_swaps\s*\)\s*\{\s*"
+        r"ubwc_enabled\s*=\s*false\s*;\s*"
+        r"force_linear_tile\s*=\s*true\s*;\s*\})",
+        re.S,
+    )
+    if mut_pat.search(imtxt):
+        imtxt = mut_pat.sub(
+            r"} else if (!mutable_ubwc_fc) {\n"
+            r"            \1 else if (!format_list_ubwc_possible(device, fmt_list, pCreateInfo)) {\n"
+            r"               ubwc_enabled = false;\n"
+            r"            } else {\n"
+            r"               is_mutable = true;\n"
+            r"            }",
+            imtxt,
+            count=1,
+        )
+        imchanged = True
+        print("  [applied] Unlocked hardware UBWC compression on compatible DXVK mutable-format images in tu_image.cc")
+
+    # 8b. Turnip-Z #30: Keep DRM_FORMAT_MOD_QCOM_COMPRESSED tiled (TILE6_3) and UBWC-enabled
+    mod_pat = re.compile(r'(if\s*\(\s*modifier\s*==\s*DRM_FORMAT_MOD_QCOM_COMPRESSED\s*\)\s*\{\s*(?:assert\(!force_linear_tile\);\s*)?ubwc_enabled\s*=\s*true\s*;)')
+    if mod_pat.search(imtxt) and "tile_mode = TILE6_3;" not in imtxt[imtxt.find("DRM_FORMAT_MOD_QCOM_COMPRESSED"):imtxt.find("DRM_FORMAT_MOD_QCOM_COMPRESSED")+250]:
+        imtxt = mod_pat.sub(r'\1\n      force_linear_tile = false;\n      tile_mode = TILE6_3;', imtxt, count=1)
+        imchanged = True
+        print("  [applied] Keep QCOM_COMPRESSED images tiled (TILE6_3) and UBWC-enabled (Turnip-Z #30)")
+
+    if imchanged:
+        img_cc.write_text(imtxt, encoding="utf-8")
+
+# ── 9. tu_pipeline.cc (Guard Alpha-to-Coverage Shader Emulation on 1x MSAA) ──
+pipe_cc = Path("src/freedreno/vulkan/tu_pipeline.cc")
+if pipe_cc.exists():
+    ptxt = pipe_cc.read_text(encoding="utf-8")
+    old_a2c = """      if (builder->device->physical_device->instance->drirc.misc.emulate_alpha_to_coverage) {
+         keys[MESA_SHADER_FRAGMENT].emulate_alpha_to_coverage = true;
+      }"""
+    new_a2c = """      if (builder->device->physical_device->instance->drirc.misc.emulate_alpha_to_coverage &&
+          (!msaa_info || msaa_info->alphaToCoverageEnable ||
+           msaa_info->rasterizationSamples > VK_SAMPLE_COUNT_1_BIT)) {
+         keys[MESA_SHADER_FRAGMENT].emulate_alpha_to_coverage = true;
+      }"""
+    if old_a2c in ptxt:
+        ptxt = ptxt.replace(old_a2c, new_a2c, 1)
+        pipe_cc.write_text(ptxt, encoding="utf-8")
+        print("  [applied] Guarded fragment shader Alpha-to-Coverage emulation against 1x MSAA pipelines in tu_pipeline.cc")
+
+# ── 10. tu_lrz.cc (Vauzi-17 #61, #55, #53 LRZ Preservation Suite) ────────────
 lrz_cc = Path("src/freedreno/vulkan/tu_lrz.cc")
 if lrz_cc.exists():
     ltxt = lrz_cc.read_text(encoding="utf-8")
@@ -242,87 +414,7 @@ if lrz_cc.exists():
     if lchanged:
         lrz_cc.write_text(ltxt, encoding="utf-8")
 
-# 5c. Vauzi-17 #63: IR3 Instruction Scheduler Live Register Pressure Reduction
-sched_c = Path("src/freedreno/ir3/ir3_sched.c")
-if sched_c.exists():
-    stxt = sched_c.read_text(encoding="utf-8")
-    old_choose = """      unsigned distance = nearest_use(n->instr);
-
-      if (!chosen || rank > chosen_rank ||
-          (rank == chosen_rank && distance < chosen_distance)) {
-         chosen = n;
-         chosen_distance = distance;
-         chosen_rank = rank;
-      }"""
-    new_choose = """      unsigned distance = nearest_use(n->instr);
-      int live = live_effect(n->instr);
-
-      bool better = !chosen || rank > chosen_rank;
-      if (!better && rank == chosen_rank) {
-         if (live < chosen_live)
-            better = true;
-         else if (live == chosen_live && distance < chosen_distance)
-            better = true;
-      }
-
-      if (better) {
-         chosen = n;
-         chosen_distance = distance;
-         chosen_rank = rank;
-         chosen_live = live;
-      }"""
-    if old_choose in stxt and "int chosen_live = 0;" not in stxt:
-        stxt = re.sub(r"(\b(?:unsigned|int)\s+chosen_distance\b[^\n]*\n)", r"\1   int chosen_live = 0;\n", stxt, count=1)
-        stxt = stxt.replace(old_choose, new_choose, 1)
-        sched_c.write_text(stxt, encoding="utf-8")
-        print("  [applied] IR3 scheduler live register pressure reduction in choose_instr_inc (Vauzi-17 #63)")
-
-# 5d. Vauzi-17 #62: Skip redundant dynamic draw state packet emission in tu_cmd_buffer.h & tu_pipeline.cc
-cmd_h = Path("src/freedreno/vulkan/tu_cmd_buffer.h")
-pipe_cc = Path("src/freedreno/vulkan/tu_pipeline.cc")
-if cmd_h.exists() and pipe_cc.exists():
-    htxt = cmd_h.read_text(encoding="utf-8")
-    ptxt = pipe_cc.read_text(encoding="utf-8")
-    old_h = "struct tu_draw_state dynamic_state[TU_DYNAMIC_STATE_COUNT];"
-    new_h = "struct tu_draw_state dynamic_state[TU_DYNAMIC_STATE_COUNT];\n   const uint32_t *dynamic_state_map[TU_DYNAMIC_STATE_COUNT];"
-    p_pat = re.compile(
-        r"tu_cs_begin_sub_stream\(&cmd->sub_cs,\s*size,\s*&cs\);\s*\\\n"
-        r"\s*tu6_emit_##name<CHIP>\(&cs,\s*__VA_ARGS__\);\s*\\\n"
-        r"\s*cmd->state\.dynamic_state\[id\]\s*=\s*\\\n"
-        r"\s*tu_cs_end_draw_state\(&cmd->sub_cs,\s*&cs\);\s*\\\n"
-        r"\s*dirty_draw_states\s*\|=\s*\(1u\s*<<\s*id\);"
-    )
-    new_p = (
-        "tu_cs_begin_sub_stream(&cmd->sub_cs, size, &cs); \\\n"
-        "         tu6_emit_##name<CHIP>(&cs, __VA_ARGS__); \\\n"
-        "         uint32_t emit_size = tu_cs_get_size(&cs); \\\n"
-        "         if (cmd->state.dynamic_state_map[id] != NULL && \\\n"
-        "             cmd->state.dynamic_state[id].size == emit_size && \\\n"
-        "             memcmp(cmd->state.dynamic_state_map[id], cs.start, emit_size * sizeof(uint32_t)) == 0) { \\\n"
-        "            cmd->sub_cs.cur = cs.start; \\\n"
-        "            cmd->sub_cs.start = cs.start; \\\n"
-        "         } else { \\\n"
-        "            cmd->state.dynamic_state_map[id] = cs.start; \\\n"
-        "            cmd->state.dynamic_state[id] = tu_cs_end_draw_state(&cmd->sub_cs, &cs); \\\n"
-        "            dirty_draw_states |= (1u << id); \\\n"
-        "         }"
-    )
-    if old_h in htxt and "dynamic_state_map" not in htxt and p_pat.search(ptxt):
-        cmd_h.write_text(htxt.replace(old_h, new_h, 1), encoding="utf-8")
-        pipe_cc.write_text(p_pat.sub(new_p, ptxt), encoding="utf-8")
-        print("  [applied] Skip identical dynamic draw state packets (Vauzi-17 #62)")
-
-# 5e. Turnip-Z #30: Keep MUTABLE_FORMAT images UBWC-compressed in tu_image.cc
-img_cc = Path("src/freedreno/vulkan/tu_image.cc")
-if img_cc.exists():
-    imtxt = img_cc.read_text(encoding="utf-8")
-    mod_pat = re.compile(r'(if\s*\(\s*modifier\s*==\s*DRM_FORMAT_MOD_QCOM_COMPRESSED\s*\)\s*\{[^\n]*\n\s*ubwc_enabled\s*=\s*true\s*;)')
-    if mod_pat.search(imtxt) and "force_linear_tile = false;" not in imtxt:
-        imtxt = mod_pat.sub(r'\1\n      force_linear_tile = false;\n      tile_mode = TILE6_3;', imtxt, count=1)
-        img_cc.write_text(imtxt, encoding="utf-8")
-        print("  [applied] Keep QCOM_COMPRESSED mutable images tiled (TILE6_3) and UBWC-enabled (Turnip-Z #30)")
-
-# 5f. Remove any forced TU_DEBUG_FLUSHALL on A8xx in tu_device.cc
+# ── 11. Remove any forced TU_DEBUG_FLUSHALL on A8xx in tu_device.cc ──────────
 dev_file = Path("src/freedreno/vulkan/tu_device.cc")
 if dev_file.exists():
     dtxt = dev_file.read_text(encoding="utf-8")
