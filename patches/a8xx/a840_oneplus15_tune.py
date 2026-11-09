@@ -279,14 +279,14 @@ if cmd_cc.exists():
     old_sysmem_call = """   tu_autotune::render_mode optimal_mode =
       cmd->device->autotune->get_optimal_mode(cmd, rp_ctx, rp_key);"""
     new_sysmem_call = """   if (cmd->state.rp.drawcall_count >= 5 &&
-       (cmd->state.tiling->tile_count.width * cmd->state.tiling->tile_count.height) <= 2) {
+       (cmd->state.tiling->vsc.tile_count.width * cmd->state.tiling->vsc.tile_count.height) <= 2) {
       *rp_ctx = nullptr;
       return false;
    }
 
    tu_autotune::render_mode optimal_mode =
       cmd->device->autotune->get_optimal_mode(cmd, rp_ctx, rp_key);"""
-    if old_sysmem_call in ctxt and "cmd->state.tiling->tile_count.width * cmd->state.tiling->tile_count.height" not in ctxt:
+    if old_sysmem_call in ctxt and "cmd->state.tiling->vsc.tile_count.width * cmd->state.tiling->vsc.tile_count.height" not in ctxt:
         ctxt = ctxt.replace(old_sysmem_call, new_sysmem_call, 1)
         cchanged = True
         print("  [applied] Added <=2-bin 18MB HPM GMEM zero-CPU fast-path in tu_cmd_buffer.cc")
