@@ -331,7 +331,7 @@ package_variant() {
     mesa_short="$(git rev-parse --short=12 HEAD)"
 
     local pretty_name="Turnip A840 OnePlus 15 Apex Max-Perf (Android 17)"
-    local desc="OnePlus 15 (SD 8 Elite Gen 5 / Adreno 840) Apex Max-Perf Suite — KGSL PWR_MAX Clock Lock, Governor Downclock Disable, Turnip-Z Fast Sampling, SP Hysteresis, LRZ Rescue, 18MB HPM Zero-CPU GMEM"
+    local desc="OnePlus 15 (SD 8 Elite Gen 5 / Adreno 840) Apex Max-Perf Suite — KGSL PWR_MAX Clock Lock, Governor Downclock Disable, 18MB HPM Zero-CPU GMEM, SP Hysteresis, 16-Fetch Window, DXVK UBWC"
     local suffix="A840-OnePlus15-Apex"
 
     local output_dir="/tmp/turnip-output"
